@@ -1,0 +1,3 @@
+cd "C:\Users\Jainil Doshi\.gemini\antigravity\scratch\airfoil-aeroflow-studio"
+npm run dev
+
