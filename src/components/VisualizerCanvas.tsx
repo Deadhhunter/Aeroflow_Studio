@@ -8,8 +8,44 @@ import {
   SmokeParticle,
 } from '../types/aerodynamics';
 import { traceStreamline, updateSmokeParticles } from '../physics/flowFieldSolver';
-import { getOffBodyVelocity } from '../physics/vortexPanelSolver';
+import { getOffBodyVelocityWorld } from '../physics/vortexPanelSolver';
+import { airfoilToWorldPoints, bodyToWorldPoint, panelsToWorld, worldToBodyPoint } from '../physics/coordinateTransforms';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+const smoothstep = (edge0: number, edge1: number, x: number) => {
+  const t = clamp01((x - edge0) / Math.max(1e-9, edge1 - edge0));
+  return t * t * (3 - 2 * t);
+};
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+type RGB = { r: number; g: number; b: number };
+const smokeStops: Array<{ t: number; c: RGB }> = [
+  { t: 0.00, c: { r: 212, g: 225, b: 236 } },
+  { t: 0.30, c: { r: 255, g: 246, b: 185 } },
+  { t: 0.55, c: { r: 255, g: 223, b: 66 } },
+  { t: 0.78, c: { r: 255, g: 145, b: 34 } },
+  { t: 1.00, c: { r: 255, g: 54, b: 52 } },
+];
+
+function stallTint(t: number): RGB {
+  const u = clamp01(t);
+  for (let i = 1; i < smokeStops.length; i++) {
+    if (u <= smokeStops[i].t) {
+      const a = smokeStops[i - 1];
+      const b = smokeStops[i];
+      const f = clamp01((u - a.t) / (b.t - a.t));
+      return {
+        r: Math.round(lerp(a.c.r, b.c.r, f)),
+        g: Math.round(lerp(a.c.g, b.c.g, f)),
+        b: Math.round(lerp(a.c.b, b.c.b, f)),
+      };
+    }
+  }
+  return smokeStops[smokeStops.length - 1].c;
+}
+
 
 interface VisualizerCanvasProps {
   geometry: AirfoilGeometry;
@@ -45,23 +81,25 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Smoke particles persistent pool
+  // Smoke material points are rendered as short streaklines. Each point carries
+  // a path history so the tunnel shows continuous flowing smoke instead of dots.
   const particlesRef = useRef<SmokeParticle[]>([]);
 
-  // Initialize dense smoke particle rake
+  // Initialize a smoke-injection rake. More filaments are concentrated near the
+  // airfoil where boundary-layer and separated-wake behaviour is visible.
   useEffect(() => {
     const particles: SmokeParticle[] = [];
-    const numRakes = 48;
-    const particlesPerRake = 28;
+    const numRakes = 30;
+    const particlesPerRake = 12;
 
     for (let i = 0; i < numRakes; i++) {
-      // Non-linear clustering: more rakes close to the airfoil centerline y=0
-      const norm = (i / (numRakes - 1)) * 2 - 1; // [-1, 1]
-      const y0 = Math.sign(norm) * Math.pow(Math.abs(norm), 1.25) * 0.62;
+      const norm = (i / (numRakes - 1)) * 2 - 1;
+      const y0 = Math.sign(norm) * Math.pow(Math.abs(norm), 1.12) * 0.78;
 
       for (let j = 0; j < particlesPerRake; j++) {
-        const x0 = -0.75 + (j / particlesPerRake) * 2.8 + (Math.random() - 0.5) * 0.05;
-        const particleSize = 1.2 + Math.random() * 1.6;
+        const x0 = -0.82 + (j / (particlesPerRake - 1)) * 2.65 + (Math.random() - 0.5) * 0.025;
+        const particleSize = 1.0 + Math.random() * 1.45;
+        const age = Math.random() * 1.9;
         particles.push({
           x: x0,
           y: y0,
@@ -69,15 +107,16 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
           prevY: y0,
           vx: conditions.vInf,
           vy: 0,
-          age: Math.random() * 2.8,
-          life: 2.8 + Math.random() * 1.6,
+          age,
+          life: 3.9 + Math.random() * 1.6,
           initialY: y0,
           size: particleSize,
+          trail: [{ x: x0, y: y0 }],
         });
       }
     }
     particlesRef.current = particles;
-  }, [conditions.vInf]);
+  }, [conditions.vInf, conditions.alphaDeg, geometry, panels.length]);
 
   // Coordinate transforms: Physical (x, y) where x in [-0.5, 1.5], y in [-1, 1] to Canvas (px, py)
   const toCanvasX = (x: number) => pan.x + x * zoom;
@@ -122,6 +161,14 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       const dt = Math.min(0.04, (time - lastTime) / 1000);
       lastTime = time;
 
+      // The aerodynamic solution is computed in body coordinates. The wind-tunnel
+      // view uses a horizontal freestream, so the body geometry and velocity field
+      // are rotated together by the exact floating-point alpha in radians.
+      const alphaRad = (conditions.alphaDeg * Math.PI) / 180;
+      const visualAngleRad = -alphaRad;
+      const worldPoints = airfoilToWorldPoints(geometry.points, visualAngleRad);
+      const worldPanels = panelsToWorld(panels, visualAngleRad);
+
       const width = canvas.width;
       const height = canvas.height;
 
@@ -147,13 +194,12 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       }
       ctx.stroke();
 
-      // 2. Draw Wind Direction Vector Arrow in top left
-      const windLen = 35;
-      const windAngleRad = (conditions.alphaDeg * Math.PI) / 180;
-      const windStartX = 40;
-      const windStartY = 45;
-      const windEndX = windStartX + windLen * Math.cos(windAngleRad);
-      const windEndY = windStartY - windLen * Math.sin(windAngleRad);
+      // 2. Draw horizontal tunnel freestream. AoA belongs to the airfoil, not the wind arrow.
+      const windLen = 52;
+      const windStartX = 34;
+      const windStartY = 42;
+      const windEndX = windStartX + windLen;
+      const windEndY = windStartY;
 
       ctx.strokeStyle = '#00f0ff';
       ctx.fillStyle = '#00f0ff';
@@ -181,10 +227,12 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       ctx.font = '10px monospace';
       ctx.fillStyle = '#38bdf8';
       ctx.fillText(
-        `V∞ (α = ${conditions.alphaDeg > 0 ? `+${conditions.alphaDeg}°` : `${conditions.alphaDeg}°`})`,
+        `V∞  →  horizontal tunnel flow`,
         windStartX - 10,
         windStartY + 25
       );
+      ctx.fillStyle = '#a5f3fc';
+      ctx.fillText(`α = ${conditions.alphaDeg >= 0 ? '+' : ''}${conditions.alphaDeg.toFixed(3)}°  |  ${alphaRad.toFixed(7)} rad`, windStartX - 10, windStartY + 39);
 
       // 3. Render Selected Visualization Mode
       if (sourceStrengths.length > 0) {
@@ -208,7 +256,7 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
               sourceStrengths,
               gammaAirfoil,
               conditions,
-              geometry.points,
+              worldPoints,
               300,
               0.010
             );
@@ -259,90 +307,148 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
             }
           }
         } else if (visMode === 'smoke') {
-          // Dense Luminous Smoke Wind Tunnel
+          // PHYSICS-BASED SMOKE STREAKLINES
+          // Each visible filament is the accumulated trajectory of a material point
+          // integrated through the solved off-body velocity field with RK2/Heun.
           particlesRef.current = updateSmokeParticles(
             particlesRef.current,
             panels,
             sourceStrengths,
             gammaAirfoil,
             conditions,
-            geometry.points,
+            worldPoints,
             dt,
             results.isStalled,
-            results.separationUpper
+            results.separationUpper,
+            time / 1000
           );
 
           ctx.save();
-          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
 
           const isStalled = results.isStalled;
-          const sepX =
-            results.separationUpper ??
-            (isStalled ? Math.max(0.18, 0.7 - 0.04 * (Math.abs(conditions.alphaDeg) - 14)) : 1.5);
+          const sepX = results.separationUpper ?? (
+            isStalled
+              ? Math.max(0.16, 0.72 - 0.035 * Math.max(0, Math.abs(conditions.alphaDeg) - 14))
+              : null
+          );
 
           for (const p of particlesRef.current) {
-            const px = toCanvasX(p.x);
-            const py = toCanvasY(p.y);
-            const prevPx = toCanvasX(p.prevX);
-            const prevPy = toCanvasY(p.prevY);
+            const trail = p.trail ?? [{ x: p.prevX, y: p.prevY }, { x: p.x, y: p.y }];
+            if (trail.length < 2) continue;
 
-            const speedSq = p.vx * p.vx + p.vy * p.vy;
-            const speedRatio = Math.min(2.5, Math.sqrt(speedSq) / conditions.vInf);
+            const ageFade = clamp01(Math.sin(Math.PI * clamp01(p.age / p.life)));
+            // Draw two layers: broad low-opacity haze + narrow smoke core.
+            // The geometry of the streak itself comes entirely from the velocity field.
+            for (let k = 1; k < trail.length; k++) {
+              const a = trail[k - 1];
+              const b = trail[k];
+              const f = k / (trail.length - 1);
+              const mx = 0.5 * (a.x + b.x);
+              const my = 0.5 * (a.y + b.y);
+              const body = worldToBodyPoint({ x: mx, y: my }, alphaRad);
+              const side = conditions.alphaDeg >= 0 ? 1 : -1;
 
-            // Smooth bell-curve alpha
-            const lifeRatio = Math.min(1.0, p.age / p.life);
-            let alpha = Math.sin(lifeRatio * Math.PI);
-            if (p.x < -0.45) alpha *= Math.max(0.1, (p.x + 0.75) / 0.3);
+              const nearAirfoil = Math.exp(-Math.pow((body.y - side * 0.08) / 0.15, 2));
+              const downstream = sepX !== null && body.x > sepX
+                ? smoothstep(sepX, sepX + 0.35, body.x) * Math.exp(-Math.pow(body.y / (0.22 + 0.08 * Math.max(0, body.x - sepX)), 2))
+                : 0;
+              const affected = clamp01(Math.max(nearAirfoil * smoothstep(-0.12, 0.02, body.x), downstream));
 
-            // Check if particle is inside the separated stall zone
-            const isSeparatedParticle =
-              isStalled &&
-              p.x >= sepX &&
-              ((conditions.alphaDeg >= 0 && p.y >= -0.05 && p.y <= 0.65) ||
-                (conditions.alphaDeg < 0 && p.y <= 0.05 && p.y >= -0.65));
+              // Stall colour is a diagnostic scalar, while the trajectory/shape remains
+              // governed by the velocity field and reduced-order separated wake closure.
+              let stallSignal = clamp01(results.stallProximity * affected);
+              if (sepX !== null && body.x >= sepX && downstream > 0.18) {
+                stallSignal = Math.max(stallSignal, 0.92 * downstream);
+              }
+              const tint = stallTint(stallSignal);
 
-            let r = 180,
-              g = 220,
-              b = 255;
+              const tail = Math.pow(f, 1.15);
+              const alphaTrail = 0.045 + 0.22 * tail;
+              const neutral = { r: 201, g: 216, b: 232 };
+              const mix = clamp01(0.10 + 0.90 * affected);
+              const r = Math.round(lerp(neutral.r, tint.r, mix));
+              const g = Math.round(lerp(neutral.g, tint.g, mix));
+              const bl = Math.round(lerp(neutral.b, tint.b, mix));
 
-            if (isSeparatedParticle) {
-              // TURNS RED IN STALL FLOW SEPARATION ZONE!
-              r = 255;
-              g = 25;
-              b = 65;
-              alpha = Math.min(1.0, alpha * 1.5);
-            } else if (speedRatio > 1.15) {
-              // Suction acceleration -> luminous cyan
-              r = 0;
-              g = 240;
-              b = 255;
-            } else if (speedRatio < 0.85) {
-              // Stagnation deceleration -> warm amber
-              r = 255;
-              g = 160;
-              b = 40;
+              const hazeWidth = Math.max(4.0, p.size * 3.0 * (zoom / 360));
+              const coreWidth = Math.max(0.9, p.size * (0.75 + 0.8 * affected) * (zoom / 360));
+              const px1 = toCanvasX(a.x);
+              const py1 = toCanvasY(a.y);
+              const px2 = toCanvasX(b.x);
+              const py2 = toCanvasY(b.y);
+
+              // Haze layer gives the smoke volume without making it look like a neon line.
+              ctx.strokeStyle = `rgba(${r},${g},${bl},${alphaTrail * ageFade * 0.28})`;
+              ctx.lineWidth = hazeWidth;
+              ctx.beginPath();
+              ctx.moveTo(px1, py1);
+              ctx.lineTo(px2, py2);
+              ctx.stroke();
+
+              // Condensed smoke core.
+              ctx.strokeStyle = `rgba(${Math.min(255,r+18)},${Math.min(255,g+18)},${Math.min(255,bl+18)},${alphaTrail * ageFade * 1.25})`;
+              ctx.lineWidth = coreWidth;
+              ctx.beginPath();
+              ctx.moveTo(px1, py1);
+              ctx.lineTo(px2, py2);
+              ctx.stroke();
             }
 
-            // Draw silky smooth streakline segment
-            ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${isSeparatedParticle ? alpha * 0.9 : alpha * 0.5})`;
-            ctx.lineWidth = Math.max(isSeparatedParticle ? 2.0 : 1.2, p.size * (zoom / 360));
-            ctx.lineCap = 'round';
-            ctx.beginPath();
-            ctx.moveTo(prevPx, prevPy);
-            ctx.lineTo(px, py);
-            ctx.stroke();
-
-            // Glowing particle head
-            const radius = Math.max(
-              isSeparatedParticle ? 2.4 : 1.5,
-              (p.size * (isSeparatedParticle ? 1.2 : 0.9)) * (zoom / 360)
-            );
-            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha * 0.95})`;
-            ctx.beginPath();
-            ctx.arc(px, py, radius, 0, 2 * Math.PI);
-            ctx.fill();
+            // A tiny inlet marker makes the smoke source read like a wind-tunnel rake.
+            const px = toCanvasX(p.x);
+            const py = toCanvasY(p.y);
+            if (p.x < -0.62) {
+              ctx.fillStyle = `rgba(226, 239, 250, ${0.12 * ageFade})`;
+              ctx.beginPath();
+              ctx.arc(px, py, Math.max(0.7, p.size * 0.55), 0, Math.PI * 2);
+              ctx.fill();
+            }
           }
 
+          // Add a faint tunnel-wide flow ribbon layer. These are actual RK2 streamlines
+          // from the same velocity field and help the eye read continuous flow direction.
+          const ribbonYs = [-0.72, -0.56, -0.38, -0.20, 0.20, 0.38, 0.56, 0.72];
+          for (const y0 of ribbonYs) {
+            const line = traceStreamline(
+              -0.76,
+              y0,
+              panels,
+              sourceStrengths,
+              gammaAirfoil,
+              conditions,
+              worldPoints,
+              280,
+              0.012
+            ).points;
+            if (line.length < 2) continue;
+            ctx.strokeStyle = `rgba(188, 216, 235, ${Math.abs(y0) < 0.3 ? 0.055 : 0.035})`;
+            ctx.lineWidth = 1.1;
+            ctx.beginPath();
+            ctx.moveTo(toCanvasX(line[0].x), toCanvasY(line[0].y));
+            for (let k = 1; k < line.length; k++) {
+              ctx.lineTo(toCanvasX(line[k].x), toCanvasY(line[k].y));
+            }
+            ctx.stroke();
+          }
+
+          // Diagnostic legend. Colour indicates modeled stall proximity, NOT temperature.
+          const legendX = width - 220;
+          const legendY = 18;
+          ctx.font = '9px monospace';
+          ctx.fillStyle = 'rgba(148,163,184,0.75)';
+          ctx.fillText('STALL PROXIMITY / SMOKE', legendX, legendY);
+          const legendColors = [0, 0.30, 0.55, 0.78, 1].map(stallTint);
+          for (let i = 0; i < legendColors.length; i++) {
+            const c = legendColors[i];
+            ctx.fillStyle = `rgb(${c.r},${c.g},${c.b})`;
+            ctx.fillRect(legendX + i * 39, legendY + 8, 32, 4);
+          }
+          ctx.fillStyle = 'rgba(148,163,184,0.58)';
+          ctx.fillText('free stream', legendX, legendY + 24);
+          ctx.fillText('separation', legendX + 120, legendY + 24);
           ctx.restore();
         } else if (visMode === 'vectors') {
           // Velocity Vector Grid
@@ -354,7 +460,7 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
             const gx = -0.4 + (ix / (nx - 1)) * 1.8;
             for (let iy = 0; iy < ny; iy++) {
               const gy = -0.5 + (iy / (ny - 1)) * 1.0;
-              const v = getOffBodyVelocity(gx, gy, panels, sourceStrengths, gammaAirfoil, conditions);
+              const v = getOffBodyVelocityWorld(gx, gy, panels, sourceStrengths, gammaAirfoil, conditions);
 
               const speed = v.speed / conditions.vInf;
               const startX = toCanvasX(gx);
@@ -390,7 +496,7 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
             const gx = -0.45 + (ix / cols) * 2.2;
             for (let iy = 0; iy < rows; iy++) {
               const gy = -0.6 + (iy / rows) * 1.2;
-              const v = getOffBodyVelocity(gx, gy, panels, sourceStrengths, gammaAirfoil, conditions);
+              const v = getOffBodyVelocityWorld(gx, gy, panels, sourceStrengths, gammaAirfoil, conditions);
 
               // Cp ranges typically from -3.0 (suction, high speed) to +1.0 (stagnation)
               // Blue for suction (negative Cp), Red for high pressure (positive Cp)
@@ -408,21 +514,38 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
 
       // 4. Draw Chord Line & Camber Line Overlay
       if (showCamberLine) {
-        // Chord line: (0, 0) to (1, 0)
+        // Quarter-chord body axes after exact AoA rotation.
+        const bodyLeading = bodyToWorldPoint({ x: 0, y: 0 }, visualAngleRad);
+        const bodyTrailing = bodyToWorldPoint({ x: 1, y: 0 }, visualAngleRad);
+        const pivot = bodyToWorldPoint({ x: 0.25, y: 0 }, visualAngleRad);
+
         ctx.strokeStyle = '#475569';
         ctx.setLineDash([4, 4]);
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(toCanvasX(0), toCanvasY(0));
-        ctx.lineTo(toCanvasX(1), toCanvasY(0));
+        ctx.moveTo(toCanvasX(bodyLeading.x), toCanvasY(bodyLeading.y));
+        ctx.lineTo(toCanvasX(bodyTrailing.x), toCanvasY(bodyTrailing.y));
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Flap hinge line if deflected
+        // AoA measurement arc at quarter chord.
+        if (Math.abs(alphaRad) > 1e-6) {
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(toCanvasX(pivot.x), toCanvasY(pivot.y), 28, 0, -alphaRad, alphaRad > 0);
+          ctx.stroke();
+          ctx.font = '10px monospace';
+          ctx.fillStyle = '#fbbf24';
+          ctx.fillText(`α ${conditions.alphaDeg >= 0 ? '+' : ''}${conditions.alphaDeg.toFixed(3)}°`, toCanvasX(pivot.x) + 33, toCanvasY(pivot.y) - 6);
+        }
+
+        // Flap hinge marker if deflected
         if (Math.abs(geometry.flapAngleDeg) > 0.01) {
+          const hinge = bodyToWorldPoint({ x: geometry.flapHingeX, y: 0 }, visualAngleRad);
           ctx.strokeStyle = '#a855f7';
           ctx.beginPath();
-          ctx.arc(toCanvasX(geometry.flapHingeX), toCanvasY(0), 4, 0, 2 * Math.PI);
+          ctx.arc(toCanvasX(hinge.x), toCanvasY(hinge.y), 4, 0, 2 * Math.PI);
           ctx.stroke();
         }
       }
@@ -430,18 +553,18 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       // 5. Render Airfoil Surface
       if (geometry.points.length > 0) {
         ctx.beginPath();
-        ctx.moveTo(toCanvasX(geometry.points[0].x), toCanvasY(geometry.points[0].y));
-        for (let i = 1; i < geometry.points.length; i++) {
-          ctx.lineTo(toCanvasX(geometry.points[i].x), toCanvasY(geometry.points[i].y));
+        ctx.moveTo(toCanvasX(worldPoints[0].x), toCanvasY(worldPoints[0].y));
+        for (let i = 1; i < worldPoints.length; i++) {
+          ctx.lineTo(toCanvasX(worldPoints[i].x), toCanvasY(worldPoints[i].y));
         }
         ctx.closePath();
 
         // Airfoil interior fill (aerospace stealth composite finish)
         const foilGrad = ctx.createLinearGradient(
-          toCanvasX(0),
-          toCanvasY(0.2),
-          toCanvasX(1),
-          toCanvasY(-0.2)
+          toCanvasX(worldPoints[0].x),
+          toCanvasY(worldPoints[0].y),
+          toCanvasX(worldPoints[worldPoints.length - 1].x),
+          toCanvasY(worldPoints[worldPoints.length - 1].y)
         );
         foilGrad.addColorStop(0, '#131e33');
         foilGrad.addColorStop(1, '#0b1220');
@@ -459,8 +582,8 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       }
 
       // 6. Draw Individual Surface Panels & Normal Vectors
-      if (showPanels && panels.length > 0) {
-        panels.forEach((p, idx) => {
+      if (showPanels && worldPanels.length > 0) {
+        worldPanels.forEach((p, idx) => {
           // Panel node
           ctx.fillStyle = '#ffffff';
           ctx.beginPath();
@@ -486,8 +609,9 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
 
       // 7. Center of Pressure (Xcp) & Lift Resultant Vector
       if (showCpIndicator && Math.abs(results.cl) > 0.05) {
-        const xcpCanvas = toCanvasX(results.xcp);
-        const ycpCanvas = toCanvasY(0);
+        const cpWorld = bodyToWorldPoint({ x: results.xcp, y: 0 }, visualAngleRad);
+        const xcpCanvas = toCanvasX(cpWorld.x);
+        const ycpCanvas = toCanvasY(cpWorld.y);
 
         // Xcp marker
         ctx.fillStyle = '#00ff88';
@@ -533,17 +657,30 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
           results.separationUpper ??
           Math.max(0.18, 0.7 - 0.04 * (Math.abs(conditions.alphaDeg) - 14));
 
-        // Find surface y at separation x
-        let sepSurfaceY = 0.08;
+        // Separation is solved in body coordinates, then transformed into the tunnel frame.
+        let sepSurfaceY = conditions.alphaDeg >= 0 ? 0.08 : -0.08;
         if (geometry.points.length > 0) {
-          const closestPt = geometry.points.reduce((prev, curr) =>
-            Math.abs(curr.x - sepX) < Math.abs(prev.x - sepX) && curr.y > 0 ? curr : prev
-          );
-          sepSurfaceY = closestPt.y;
+          const targetSign = conditions.alphaDeg >= 0 ? 1 : -1;
+          const surfacePoint = geometry.points.reduce((best, curr) => {
+            const sameSide = curr.y * targetSign >= -1e-5;
+            if (!sameSide) return best;
+            return Math.abs(curr.x - sepX) < Math.abs(best.x - sepX) ? curr : best;
+          }, { x: sepX, y: sepSurfaceY });
+          sepSurfaceY = surfacePoint.y;
         }
 
-        const sepCanvasX = toCanvasX(sepX);
-        const sepCanvasY = toCanvasY(conditions.alphaDeg >= 0 ? sepSurfaceY : -sepSurfaceY);
+        const sepWorld = bodyToWorldPoint({ x: sepX, y: sepSurfaceY }, visualAngleRad);
+        const sepCanvasX = toCanvasX(sepWorld.x);
+        const sepCanvasY = toCanvasY(sepWorld.y);
+
+        // Soft separated-flow envelope, aligned with the rotated airfoil.
+        ctx.save();
+        const bubble = bodyToWorldPoint({ x: Math.min(1.15, sepX + 0.28), y: conditions.alphaDeg >= 0 ? 0.25 : -0.25 }, visualAngleRad);
+        ctx.fillStyle = 'rgba(255, 70, 110, 0.055)';
+        ctx.beginPath();
+        ctx.ellipse(toCanvasX(bubble.x), toCanvasY(bubble.y), 85, 42, alphaRad, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
 
         // Pulsing red separation initiation marker
         ctx.save();

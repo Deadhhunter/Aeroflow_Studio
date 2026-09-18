@@ -39,7 +39,7 @@ export interface AirfoilGeometry {
 }
 
 export interface FlowConditions {
-  alphaDeg: number;  // Angle of attack in degrees
+  alphaDeg: number;  // Angle of attack in degrees; evaluated continuously, converted to radians in solver
   vInf: number;      // Freestream speed (m/s)
   reynolds: number;  // Reynolds number
 }
@@ -56,6 +56,9 @@ export interface AeroResults {
   separationUpper: number | null; // Separation point x/c on upper surface
   separationLower: number | null; // Separation point x/c on lower surface
   isStalled: boolean;
+  stallAlphaDeg: number;    // Modelled onset angle for stall [deg]
+  stallMarginDeg: number;   // Positive = margin remaining to nominal stall [deg]
+  stallProximity: number;   // 0..1, used for continuous near-stall visualization
   circulation: number; // Total circulation Gamma
 }
 
@@ -80,4 +83,6 @@ export interface SmokeParticle {
   life: number;
   initialY: number;
   size: number;
+  /** Recent material path of the injected smoke filament, newest point last. */
+  trail: Point2D[];
 }

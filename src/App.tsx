@@ -80,7 +80,7 @@ export function App() {
   const polars: PolarPoint[] = useMemo(() => {
     const sweep: PolarPoint[] = [];
     // Sweep alpha from -10 deg to +20 deg
-    for (let a = -10; a <= 20; a += 1.5) {
+    for (let a = -10; a <= 20; a += 0.5) {
       const sweepCond: FlowConditions = { ...conditions, alphaDeg: a };
       const inv = solveVortexPanels(panels, sweepCond);
       const visc = computeBoundaryLayerAndDrag(panels, inv.results, sweepCond);

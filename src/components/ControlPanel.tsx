@@ -163,12 +163,16 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
           value={conditions.alphaDeg}
           min={-18}
           max={25}
-          step={0.1}
-          displayFn={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}°`}
+          step={0.01}
+          displayFn={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(3)}°`}
           onChange={(v) => onUpdateConditions({ alphaDeg: v })}
           color="cyan"
           hint="-18° | 0° | +10° | +25°"
         />
+        <div className="flex items-center justify-between mt-1 text-[10px] font-mono">
+          <span className="text-slate-600">Body/tunnel transform</span>
+          <span className="text-cyan-300 tabular-nums">α = {((conditions.alphaDeg * Math.PI) / 180).toFixed(7)} rad</span>
+        </div>
 
         <div>
           <div className="flex justify-between items-center text-xs font-mono mb-1">

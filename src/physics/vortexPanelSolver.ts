@@ -1,5 +1,6 @@
 import { Panel, FlowConditions, AeroResults } from '../types/aerodynamics';
 import { solveLinearSystem } from './linearAlgebra';
+import { worldToBodyPoint, rotateVector } from './coordinateTransforms';
 
 /**
  * Compute local geometric angles and distances from point (x, y) to panel endpoints
@@ -296,3 +297,42 @@ export function getOffBodyVelocity(
 
   return { u, v, speed, cp };
 }
+/**
+ * Evaluate the same solved panel flow in the horizontal wind-tunnel frame.
+ * The aerodynamic solution remains body-fixed; the airfoil is rendered/advected
+ * by rotating the body solution through the exact alpha angle.
+ */
+export function getOffBodyVelocityWorld(
+  x: number,
+  y: number,
+  panels: Panel[],
+  qSources: number[],
+  gammaAirfoil: number,
+  conditions: FlowConditions
+): { u: number; v: number; speed: number; cp: number } {
+  const alphaRad = (conditions.alphaDeg * Math.PI) / 180;
+  // Positive aerodynamic AoA is shown as a nose-up airfoil in the horizontal
+  // tunnel. In these Cartesian coordinates that is a -alpha body rotation.
+  const visualAngleRad = -alphaRad;
+  const bodyPoint = worldToBodyPoint({ x, y }, visualAngleRad);
+  const bodyVelocity = getOffBodyVelocity(
+    bodyPoint.x,
+    bodyPoint.y,
+    panels,
+    qSources,
+    gammaAirfoil,
+    conditions
+  );
+  const worldVelocity = rotateVector(
+    { x: bodyVelocity.u, y: bodyVelocity.v },
+    visualAngleRad
+  );
+
+  return {
+    u: worldVelocity.x,
+    v: worldVelocity.y,
+    speed: bodyVelocity.speed,
+    cp: bodyVelocity.cp,
+  };
+}
+

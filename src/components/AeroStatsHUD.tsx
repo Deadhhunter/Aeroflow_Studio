@@ -10,6 +10,15 @@ interface AeroStatsHUDProps {
 export const AeroStatsHUD: React.FC<AeroStatsHUDProps> = ({ results, conditions }) => {
   const ldRatio = results.cd > 0 ? results.cl / results.cd : 0;
   const isStalled = results.isStalled;
+  const stallProximity = results.stallProximity ?? (isStalled ? 1 : 0);
+  const stallMargin = results.stallMarginDeg ?? 999;
+  const flowLabel = isStalled
+    ? 'STALL DETECTED'
+    : stallProximity >= 0.75
+      ? 'NEAR STALL'
+      : stallProximity >= 0.35
+        ? 'PRE-STALL'
+        : 'ATTACHED FLOW';
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
@@ -115,13 +124,19 @@ export const AeroStatsHUD: React.FC<AeroStatsHUDProps> = ({ results, conditions 
         className={`hud-panel rounded-xl p-3 border relative overflow-hidden transition-colors ${
           isStalled
             ? 'border-red-500/50 bg-red-950/20'
-            : 'border-emerald-500/30 bg-emerald-950/10'
+            : stallProximity >= 0.75
+              ? 'border-orange-400/40 bg-orange-950/10'
+              : stallProximity >= 0.35
+                ? 'border-yellow-400/30 bg-yellow-950/10'
+                : 'border-emerald-500/30 bg-emerald-950/10'
         }`}
       >
         <div className="flex items-center justify-between text-slate-400 mb-1">
           <span className="text-[11px] font-mono tracking-wider font-semibold">FLOW REGIME</span>
           {isStalled ? (
             <ShieldAlert className="w-4 h-4 text-red-400 animate-bounce" />
+          ) : stallProximity >= 0.75 ? (
+            <ShieldAlert className="w-4 h-4 text-orange-300" />
           ) : (
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
           )}
@@ -129,16 +144,22 @@ export const AeroStatsHUD: React.FC<AeroStatsHUDProps> = ({ results, conditions 
         <div className="flex items-baseline gap-1">
           <span
             className={`text-xl font-bold font-mono ${
-              isStalled ? 'text-red-400' : 'text-emerald-300'
+              isStalled ? 'text-red-400' : stallProximity >= 0.75 ? 'text-orange-300' : stallProximity >= 0.35 ? 'text-yellow-200' : 'text-emerald-300'
             }`}
           >
-            {isStalled ? 'STALL DETECTED' : 'ATTACHED FLOW'}
+            {flowLabel}
           </span>
         </div>
         <div className="mt-1 text-[10px] text-slate-400 font-mono flex justify-between">
           <span>AoA / Re:</span>
           <span className="text-slate-300">
             {conditions.alphaDeg > 0 ? `+${conditions.alphaDeg}°` : `${conditions.alphaDeg}°`} | {(conditions.reynolds / 1e6).toFixed(1)}M
+          </span>
+        </div>
+        <div className="mt-1.5 text-[10px] text-slate-400 font-mono flex justify-between">
+          <span>Stall margin:</span>
+          <span className={stallMargin <= 0 ? 'text-red-400' : stallMargin <= 4.5 ? 'text-orange-300' : 'text-emerald-300'}>
+            {stallMargin <= -0.05 ? `${Math.abs(stallMargin).toFixed(2)}° past` : `${Math.max(0, stallMargin).toFixed(2)}°`}
           </span>
         </div>
       </div>

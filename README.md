@@ -105,3 +105,27 @@ Generates an optimized static bundle in the `dist/` directory, ready to deploy t
 
 ## 📄 License
 MIT License. Built for aeronautical engineering education and portfolio demonstration.
+
+---
+
+## Coordinate Frames & AoA Rendering
+
+The aerodynamic solver is body-fixed: NACA coordinates and panel geometry remain in the airfoil frame while the freestream is resolved from the continuous angle of attack. The visual wind tunnel uses a horizontal freestream and rotates the airfoil plus the solved velocity field about the quarter-chord pivot. With the repository's existing sign convention, positive aerodynamic AoA is rendered as a nose-up airfoil using a -alpha Cartesian rotation:
+
+$$\theta_{rad} = \alpha_{deg} \pi / 180$$
+
+For the tunnel rendering convention, positive AoA is a nose-up body rotation of $-\theta_{rad}$ while the freestream remains horizontal. The transform is applied at full JavaScript floating-point precision. The UI exposes the degree value and the corresponding radian value. Smoke particles are advected in the tunnel frame and the separated wake correction is evaluated in the airfoil frame before being rotated back to the tunnel frame.
+
+This keeps geometry, flow direction, panel normals, smoke, streamlines and separation markers in the same physical coordinate system.
+## Near-stall smoke diagnostic
+
+The smoke visualization now uses a continuous 0..1 stall-proximity signal derived from the existing boundary-layer/stall model. Smoke affected by the airfoil transitions from neutral/light smoke to pale yellow, yellow, orange, and red as the model approaches and enters stall. The diagnostic is aligned with the same body/world coordinate transform used by the panel solution.
+
+The smoke color is a **diagnostic overlay**, not a claim of measured temperature or a direct CFD scalar field.
+
+
+## Smoke / flow visualization update
+
+The smoke mode now renders **material pathlines as streaklines**. Smoke points are continuously advected with Heun (RK2) integration through the same Hess-Smith off-body velocity field used by the visualization, and each material point keeps a finite path history. The result is a continuous smoke filament rather than independent dots.
+
+When the boundary-layer model predicts separation, the potential-flow solver alone cannot produce a viscous separated wake. AeroFlow therefore applies a bounded reduced-order wake closure downstream of the modeled separation point. It is tied to freestream velocity, chord and a Strouhal-number shedding relation to produce a coherent alternating wake. This is a visualization/ROM closure, **not a replacement for RANS/LES CFD**.

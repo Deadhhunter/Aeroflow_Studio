@@ -73,14 +73,25 @@ export function computeBoundaryLayerAndDrag(
   let cdPressure = Math.max(0.001, cdProfile - cdFriction);
 
   // Stall & high angle-of-attack detection
-  // Typical airfoil stalls around 12° to 17° depending on camber/thickness
-  const stallAlpha = 14.5 + 10 * (panels[0].yc); // camber increases stall angle
-  const isStalled = Math.abs(alphaDeg) > stallAlpha || upperBL.separated;
+  // Typical 2D airfoil stall onset is modelled around 12° to 17° here, with a
+  // small camber-dependent shift. The continuous proximity value is used by
+  // the wind-tunnel smoke diagnostic so the color changes gradually before
+  // the actual stall flag trips.
+  const stallAlphaDeg = 14.5 + 10 * (panels[0].yc);
+  const alphaAbs = Math.abs(alphaDeg);
+  const preStallWindowDeg = 4.5;
+  const stallMarginDeg = stallAlphaDeg - alphaAbs;
+  const alphaProximity = Math.max(0, Math.min(1,
+    (alphaAbs - (stallAlphaDeg - preStallWindowDeg)) / preStallWindowDeg
+  ));
+  const hasSeparation = upperBL.separated || lowerBL.separated;
+  const isStalled = alphaAbs > stallAlphaDeg || hasSeparation;
+  const stallProximity = isStalled ? 1 : (hasSeparation ? Math.max(alphaProximity, 0.9) : alphaProximity);
 
   let effectiveCl = inviscidResults.cl;
 
   if (isStalled) {
-    const dAlpha = Math.abs(alphaDeg) - stallAlpha;
+    const dAlpha = alphaAbs - stallAlphaDeg;
     // Post-stall lift decay & plateau
     const dropFactor = Math.max(0.4, 1.0 - 0.08 * dAlpha);
     effectiveCl = inviscidResults.cl * dropFactor;
@@ -104,6 +115,9 @@ export function computeBoundaryLayerAndDrag(
     isStalled,
     separationUpper: upperBL.separationX,
     separationLower: lowerBL.separationX,
+    stallAlphaDeg,
+    stallMarginDeg,
+    stallProximity,
   };
 }
 
